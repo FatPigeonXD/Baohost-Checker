@@ -1,0 +1,39 @@
+name: Check BaoHost Signups
+
+on:
+  schedule:
+    - cron: '*/10 * * * *' # Runs automatically every 10 minutes
+  workflow_dispatch:       # Adds a manual "Run workflow" button for testing
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Registration Status
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
+          USER_ID: "844844465835212820" # <-- Replace with your Discord User ID
+        run: |
+          python3 -c '
+          import os, urllib.request, json
+
+          url = "https://help.baohost.com/articles/registration-for-new-users"
+          req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+          try:
+              html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8").lower()
+              if "new registrations are currently closed" not in html:
+                  data = {
+                      "content": f"<@{os.environ[\"USER_ID\"]}> 🟢 **BaoHost Sign-Ups appear to be OPEN!**\nRegister here: https://panel.baohost.com/auth/register"
+                  }
+                  post_req = urllib.request.Request(
+                      os.environ["WEBHOOK_URL"],
+                      data=json.dumps(data).encode("utf-8"),
+                      headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+                  )
+                  urllib.request.urlopen(post_req)
+                  print("Alert sent to Discord!")
+              else:
+                  print("Sign-ups are still closed.")
+          except Exception as e:
+              print(f"Check failed: {e}")
+          '
