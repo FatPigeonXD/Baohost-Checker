@@ -69,6 +69,7 @@ jobs:
                   send_discord_message("<@&" + role_id + "> 🟢 **BaoHost Sign-Ups appear to be OPEN!** - https://panel.baohost.com/auth/register")
                   print("SUCCESS: Alert sent to Discord!")
               else:
+                  send_discord_message("🔴 **BaoHost Check:** Sign-ups are still closed.")
                   print("SUCCESS: Checked BaoHost — sign-ups are still closed.")
           except Exception as e:
               print("ERROR checking BaoHost:", e)
