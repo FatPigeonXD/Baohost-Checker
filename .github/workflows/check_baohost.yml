@@ -13,10 +13,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Real Headless Browser
-        run: |
-          pip install playwright
-          playwright install chromium
+      - name: Install Dependencies
+        run: pip install curl_cffi
 
       - name: Check Registration Status
         shell: python
@@ -28,8 +26,7 @@ jobs:
           import os
           import sys
           import json
-          import urllib.request
-          from playwright.sync_api import sync_playwright
+          from curl_cffi import requests
 
           webhook_url = os.environ.get("WEBHOOK_URL", "").strip()
           role_id = os.environ.get("ROLE_ID", "").strip()
@@ -44,62 +41,26 @@ jobs:
                   "content": text,
                   "allowed_mentions": {"parse": ["roles"]}
               }
-              req = urllib.request.Request(
-                  webhook_url,
-                  data=json.dumps(payload).encode("utf-8"),
-                  headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-              )
-              urllib.request.urlopen(req, timeout=15)
+              requests.post(webhook_url, json=payload, timeout=15)
 
           if test_ping:
-              send_discord_message(f"<@&{role_id}> 🛠️ **Test Role Ping Successful!** Browser monitor is connected.")
+              send_discord_message(f"<@&{role_id}> 🛠️ **Test Role Ping Successful!** Monitor is connected.")
 
-          is_open = False
-          reasons = []
+          # Check the Help Center Article
+          try:
+              resp = requests.get("https://help.baohost.com/articles/registration-for-new-users", impersonate="chrome120", timeout=20)
+              help_html = resp.text.lower()
 
-          with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True)
-              context = browser.new_context(
-                  user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-              )
-              page = context.new_page()
+              if resp.status_code != 200:
+                  print(f"Help article returned HTTP {resp.status_code}")
+                  sys.exit(0)
 
-              # 1. Check Live Panel with full JavaScript rendering
-              try:
-                  page.goto("https://panel.baohost.com/auth/register", wait_until="networkidle", timeout=30000)
-                  page.wait_for_timeout(3000) # Give React 3 seconds to render form or redirect
-                  final_url = page.url.lower()
-                  visible_text = page.inner_text("body").lower()
-                  input_count = page.locator("input").count()
-
-                  if "/login" in final_url and "register" not in visible_text and "sign up" not in visible_text:
-                      reasons.append("Panel redirected to /auth/login")
-                  elif any(w in visible_text for w in ["closed", "disabled", "not accepting", "unable to create"]):
-                      reasons.append("Panel states sign-ups are closed")
-                  elif "/register" in final_url and input_count >= 2:
-                      is_open = True
-                      reasons.append(f"Live registration form active ({input_count} input fields found)!")
-                  else:
-                      reasons.append(f"Panel checked (URL: {final_url}, Inputs: {input_count})")
-              except Exception as e:
-                  reasons.append(f"Panel browser check error ({str(e)[:40]})")
-
-              # 2. Check Help Center Article
-              try:
-                  page.goto("https://help.baohost.com/articles/registration-for-new-users", wait_until="domcontentloaded", timeout=20000)
-                  help_text = page.inner_text("body").lower()
-                  if "new registrations are currently closed" not in help_text and "closed" not in help_text:
-                      is_open = True
-                      reasons.append("Help Center article no longer says closed!")
-                  else:
-                      reasons.append("Help article still says closed")
-              except Exception as e:
-                  reasons.append("Help article unreachable")
-
-              browser.close()
-
-          summary = " | ".join(reasons)
-          if is_open:
-              send_discord_message(f"<@&{role_id}> 🟢 **BaoHost Sign-Ups are OPEN!** ({summary})\nRegister now: https://panel.baohost.com/auth/register")
-          else:
-              send_discord_message(f"🔴 **BaoHost Check:** Sign-ups are still closed. *({summary})*")
+              # If the article no longer says registrations are closed:
+              if "new registrations are currently closed" not in help_html and "closed" not in help_html:
+                  send_discord_message(f"<@&{role_id}> 🟢 **BaoHost Sign-Ups appear to be OPEN!**\nRegister now: https://panel.baohost.com/auth/register")
+                  print("SUCCESS: OPEN alert sent!")
+              else:
+                  send_discord_message(f"🔴 **BaoHost Check:** Sign-ups are still closed. *(Help article confirmed closed)*")
+                  print("SUCCESS: Closed status sent.")
+          except Exception as e:
+              print("Error checking Help Center:", e)
