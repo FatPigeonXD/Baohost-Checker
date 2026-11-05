@@ -32,7 +32,7 @@ jobs:
 
           try:
               html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8").lower()
-              if "new registrations are currently closed" not in html:
+              if "new registrations are currently closed" in html:
                   msg = "<@" + user_id + "> 🟢 **BaoHost Sign-Ups appear to be OPEN!** - https://panel.baohost.com/auth/register"
                   data = {"content": msg}
                   post_req = urllib.request.Request(
