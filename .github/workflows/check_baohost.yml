@@ -22,7 +22,7 @@ jobs:
         shell: python
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
-          ROLE_ID: "112233445566778899" # <-- Replace with your Discord Role ID
+          ROLE_ID: "1560630961199124560" # <-- Replace with your Discord Role ID
           TEST_PING: ${{ inputs.send_test_ping }}
         run: |
           import os
