@@ -4,129 +4,125 @@ on:
   workflow_dispatch:
     inputs:
       send_test_ping:
-        description: "Send a test ping to Discord?"
+        description: "Send a Discord test ping?"
         required: false
         default: false
         type: boolean
-
-  schedule:
-    - cron: "*/5 * * * *"
 
 jobs:
   check:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install Dependencies
-        run: pip install curl_cffi
-
-      - name: Check BaoHost Registration
-        shell: python
+      # STEP 1: Test Discord BEFORE installing anything
+      - name: Test Discord Webhook
+        shell: bash
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
           ROLE_ID: "1560630961199124560"
-          TEST_PING: ${{ github.event_name == 'workflow_dispatch' && inputs.send_test_ping || false }}
-
+          TEST_PING: ${{ inputs.send_test_ping }}
         run: |
+          set -e
+
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "ERROR: DISCORD_WEBHOOK secret is missing!"
+            exit 1
+          fi
+
+          if [ "$TEST_PING" = "true" ]; then
+            CONTENT="<@&${ROLE_ID}> 🛠️ BaoHost Discord webhook test successful!"
+          else
+            CONTENT="🟡 BaoHost monitor started. Checking registration status..."
+          fi
+
+          HTTP_CODE=$(curl -sS \
+            -o discord_response.txt \
+            -w "%{http_code}" \
+            -H "Content-Type: application/json" \
+            -d "$(python -c 'import json,os; print(json.dumps({"content":os.environ["CONTENT"],"allowed_mentions":{"parse":["roles"]}}))' CONTENT="$CONTENT")" \
+            "$WEBHOOK_URL")
+
+          echo "Discord HTTP status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
+            echo "Discord webhook failed."
+            cat discord_response.txt
+            exit 1
+          fi
+
+          echo "SUCCESS: Discord accepted the message."
+
+      # STEP 2: Install browser
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright requests
+          playwright install --with-deps chromium
+
+      # STEP 3: Check BaoHost
+      - name: Check Registration
+        shell: bash
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
+          ROLE_ID: "1560630961199124560"
+        run: |
+          python - <<'PY'
           import os
           import re
-          import sys
-          from curl_cffi import requests
+          import requests
+          from playwright.sync_api import sync_playwright
 
-          WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()
-          ROLE_ID = os.environ.get("ROLE_ID", "").strip()
-          TEST_PING = os.environ.get("TEST_PING", "false").lower() == "true"
-
-          REGISTER_URL = "https://panel.baohost.com/auth/register"
-
-          if not WEBHOOK_URL:
-              sys.exit("ERROR: DISCORD_WEBHOOK secret is empty!")
-
-          if not ROLE_ID:
-              sys.exit("ERROR: ROLE_ID is empty!")
+          WEBHOOK = os.environ["WEBHOOK_URL"]
+          ROLE_ID = os.environ["ROLE_ID"]
+          URL = "https://panel.baohost.com/auth/register"
 
           def send_discord(message):
-              response = requests.post(
-                  WEBHOOK_URL,
+              r = requests.post(
+                  WEBHOOK,
                   json={
                       "content": message,
-                      "allowed_mentions": {
-                          "parse": ["roles"]
-                      }
+                      "allowed_mentions": {"parse": ["roles"]}
                   },
                   timeout=20
               )
-              response.raise_for_status()
-              print("Discord notification sent successfully.")
-
-          # Optional Discord test ping
-          if TEST_PING:
-              send_discord(
-                  f"<@&{ROLE_ID}> 🛠️ *Test Ping Successful!* "
-                  "BaoHost Signup Monitor is connected."
-              )
-
-          session = requests.Session(
-              impersonate="chrome120"
-          )
-
-          session.headers.update({
-              "Accept": "text/html,application/xhtml+xml,"
-                        "application/xml;q=0.9,/;q=0.8",
-              "Accept-Language": "en-US,en;q=0.9"
-          })
+              print("Discord response:", r.status_code)
+              r.raise_for_status()
 
           status = "UNKNOWN"
-          reasons = []
+          reason = "Registration could not be verified."
 
           try:
-              print("Checking BaoHost registration page...")
+              with sync_playwright() as p:
+                  browser = p.chromium.launch(headless=True)
+                  page = browser.new_page()
 
-              response = session.get(
-                  REGISTER_URL,
-                  allow_redirects=True,
-                  timeout=30
-              )
-
-              html = response.text.lower()
-              final_url = str(response.url).lower()
-
-              # Normalize HTML whitespace
-              clean_html = re.sub(r"\s+", " ", html)
-
-              print("HTTP Status:", response.status_code)
-              print("Final URL:", final_url)
-
-              # 1. Detect Cloudflare challenges
-              challenge_markers = [
-                  "cf-chl-",
-                  "challenge-platform",
-                  "just a moment",
-                  "checking your browser",
-                  "verify you are human",
-                  "enable javascript and cookies"
-              ]
-
-              is_challenge = any(
-                  marker in clean_html
-                  for marker in challenge_markers
-              )
-
-              if response.status_code == 403 or is_challenge:
-                  status = "UNKNOWN"
-                  reasons.append(
-                      "Cloudflare JavaScript challenge detected."
+                  response = page.goto(
+                      URL,
+                      wait_until="domcontentloaded",
+                      timeout=60000
                   )
 
-              # 2. Detect BaoHost's actual paused page
-              elif response.status_code != 200:
-                  status = "UNKNOWN"
-                  reasons.append(
-                      f"Website returned HTTP {response.status_code}."
+                  page.wait_for_timeout(5000)
+
+                  code = response.status if response else 0
+                  text = re.sub(
+                      r"\s+", " ",
+                      page.locator("body").inner_text().lower()
                   )
 
-              else:
-                  paused_markers = [
+                  print("HTTP:", code)
+                  print("URL:", page.url)
+                  print("Page:", text[:1000])
+
+                  challenge_words = [
+                      "just a moment",
+                      "verify you are human",
+                      "checking your browser",
+                      "challenge-platform",
+                      "cf-chl-"
+                  ]
+
+                  paused_words = [
                       "sign up paused",
                       "sign up is temporarily disabled",
                       "new registrations are currently paused",
@@ -135,69 +131,69 @@ jobs:
                       "no eta for when sign up will reopen"
                   ]
 
-                  is_paused = any(
-                      marker in clean_html
-                      for marker in paused_markers
-                  )
+                  if code == 403 or any(x in text for x in challenge_words):
+                      status = "UNKNOWN"
+                      reason = "Cloudflare challenge detected."
 
-                  if is_paused:
+                  elif code != 200:
+                      reason = f"BaoHost HTTP {code}"
+
+                  elif any(x in text for x in paused_words):
                       status = "CLOSED"
-                      reasons.append(
-                          "BaoHost SIGN UP PAUSED screen detected."
-                      )
+                      reason = "BaoHost SIGN UP PAUSED page detected."
 
-                  # 3. Detect an actual registration form
                   elif (
-                      "/auth/register" in final_url
-                      and "<form" in clean_html
-                      and re.search(
-                          r'type=["\']password["\']|'
-                          r'name=["\']password["\']',
-                          clean_html
-                      )
-                      and not is_challenge
+                      "/auth/register" in page.url.lower()
+                      and page.locator("form:visible").count() > 0
+                      and page.locator('input[type="password"]:visible').count() > 0
                   ):
                       status = "OPEN"
-                      reasons.append(
-                          "Live registration form detected!"
-                      )
+                      reason = "Registration form detected."
 
                   else:
-                      status = "UNKNOWN"
-                      reasons.append(
-                          "Registration form or paused status "
-                          "could not be confirmed."
+                      reason = "No confirmed registration form or paused message."
+
+                  if status == "UNKNOWN":
+                      page.screenshot(
+                          path="baohost-debug.png",
+                          full_page=True
                       )
 
-          except Exception as error:
+                  browser.close()
+
+          except Exception as e:
               status = "UNKNOWN"
-              reasons.append(
-                  f"Website check failed: {str(error)[:150]}"
-              )
+              reason = f"Browser error: {str(e)[:250]}"
+              print(reason)
 
-          # 4. Report results
-          summary = " | ".join(reasons)
-
-          print("--------------------------------")
-          print("BAOHOST STATUS:", status)
-          print(summary)
-          print("--------------------------------")
+          print("FINAL STATUS:", status)
+          print("REASON:", reason)
 
           if status == "OPEN":
-
-              send_discord(
-                  f"<@&{ROLE_ID}> 🟢 *BAOHOST SIGN-UPS ARE OPEN!*\n\n"
-                  f"Registration page: {REGISTER_URL}\n"
-                  f"Details: {summary}\n\n"
-                  "🚀 *Register now before slots fill up!*"
+              message = (
+                  f"<@&{ROLE_ID}> 🟢 *BAOHOST SIGN-UPS ARE OPEN!*\n"
+                  f"{URL}\n{reason}"
+              )
+          elif status == "CLOSED":
+              message = (
+                  "🔴 *BAOHOST SIGN-UPS ARE CLOSED*\n"
+                  + reason
+              )
+          else:
+              message = (
+                  "🟡 *BAOHOST STATUS: UNKNOWN*\n"
+                  + reason
               )
 
-          elif status == "CLOSED":
+          send_discord(message)
+          print("Finished successfully.")
+          PY
 
-              print("🔴 Sign-ups are still paused.")
-              print("No Discord alert sent.")
-
-          else:
-
-              print("🟡 Status unknown.")
-              print("No false OPEN alert sent.")
+      # STEP 4: Preserve diagnostic screenshot
+      - name: Upload Debug Screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baohost-debug
+          path: baohost-debug.png
+          if-no-files-found: ignore
