@@ -13,7 +13,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Dependencies
+      - name: Install Chrome TLS Impersonator
         run: pip install curl_cffi
 
       - name: Check Registration Status
@@ -44,23 +44,52 @@ jobs:
               requests.post(webhook_url, json=payload, timeout=15)
 
           if test_ping:
-              send_discord_message(f"<@&{role_id}> 🛠️ **Test Role Ping Successful!** Monitor is connected.")
+              send_discord_message(f"<@&{role_id}> 🛠️ **Test Role Ping Successful!** Chrome TLS monitor is connected.")
 
-          # Check the Help Center Article
+          is_open = False
+          reasons = []
+
+          # Impersonate real Chrome 120 TLS handshake to bypass Cloudflare 403
+          session = requests.Session(impersonate="chrome120")
+
+          # 1. Check Live Panel (panel.baohost.com)
           try:
-              resp = requests.get("https://help.baohost.com/articles/registration-for-new-users", impersonate="chrome120", timeout=20)
-              help_html = resp.text.lower()
+              resp = session.get("https://panel.baohost.com/auth/register", allow_redirects=True, timeout=20)
+              final_url = str(resp.url).lower()
+              panel_html = resp.text.lower()
 
-              if resp.status_code != 200:
-                  print(f"Help article returned HTTP {resp.status_code}")
-                  sys.exit(0)
-
-              # If the article no longer says registrations are closed:
-              if "new registrations are currently closed" not in help_html and "closed" not in help_html:
-                  send_discord_message(f"<@&{role_id}> 🟢 **BaoHost Sign-Ups appear to be OPEN!**\nRegister now: https://panel.baohost.com/auth/register")
-                  print("SUCCESS: OPEN alert sent!")
+              if resp.status_code == 403:
+                  reasons.append("Panel behind Cloudflare JS challenge (403)")
+              elif resp.status_code in [404, 530, 502, 503]:
+                  reasons.append(f"Panel returned HTTP {resp.status_code}")
+              elif "/login" in final_url and "register" not in panel_html:
+                  reasons.append("Panel redirected to /auth/login (Closed)")
+              elif any(w in panel_html for w in ["closed", "disabled", "unable to create", "not accepting"]):
+                  reasons.append("Panel states sign-ups are closed")
+              elif resp.status_code == 200 and ("/register" in final_url or "confirm password" in panel_html):
+                  is_open = True
+                  reasons.append("Live registration page active on panel.baohost.com!")
               else:
-                  send_discord_message(f"🔴 **BaoHost Check:** Sign-ups are still closed. *(Help article confirmed closed)*")
-                  print("SUCCESS: Closed status sent.")
+                  reasons.append(f"Panel HTTP {resp.status_code} at {final_url}")
           except Exception as e:
-              print("Error checking Help Center:", e)
+              reasons.append(f"Panel error ({str(e)[:35]})")
+
+          # 2. Check Help Center Article (help.baohost.com)
+          try:
+              resp2 = session.get("https://help.baohost.com/articles/registration-for-new-users", timeout=20)
+              help_html = resp2.text.lower()
+              if resp2.status_code != 200:
+                  reasons.append(f"Help article returned HTTP {resp2.status_code}")
+              elif "new registrations are currently closed" not in help_html and "closed" not in help_html:
+                  is_open = True
+                  reasons.append("Help Center article updated!")
+              else:
+                  reasons.append("Help article still says closed")
+          except Exception as e:
+              reasons.append(f"Help article unreachable ({str(e)[:30]})")
+
+          summary = " | ".join(reasons)
+          if is_open:
+              send_discord_message(f"<@&{role_id}> 🟢 **BaoHost Sign-Ups appear to be OPEN!** ({summary})\nRegister now: https://panel.baohost.com/auth/register")
+          else:
+              send_discord_message(f"🔴 **BaoHost Check:** Sign-ups are still closed. *({summary})*")
