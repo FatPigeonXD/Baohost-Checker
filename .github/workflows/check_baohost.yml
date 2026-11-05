@@ -13,8 +13,10 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Chrome TLS Impersonator
-        run: pip install curl_cffi
+      - name: Install Real Headless Browser
+        run: |
+          pip install playwright
+          playwright install chromium
 
       - name: Check Registration Status
         shell: python
@@ -26,7 +28,8 @@ jobs:
           import os
           import sys
           import json
-          from curl_cffi import requests
+          import urllib.request
+          from playwright.sync_api import sync_playwright
 
           webhook_url = os.environ.get("WEBHOOK_URL", "").strip()
           role_id = os.environ.get("ROLE_ID", "").strip()
@@ -41,55 +44,62 @@ jobs:
                   "content": text,
                   "allowed_mentions": {"parse": ["roles"]}
               }
-              requests.post(webhook_url, json=payload, timeout=15)
+              req = urllib.request.Request(
+                  webhook_url,
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+              )
+              urllib.request.urlopen(req, timeout=15)
 
           if test_ping:
-              send_discord_message(f"<@&{role_id}> 🛠️ **Test Role Ping Successful!** Chrome TLS monitor is connected.")
+              send_discord_message(f"<@&{role_id}> 🛠️ **Test Role Ping Successful!** Browser monitor is connected.")
 
           is_open = False
           reasons = []
 
-          # Impersonate real Chrome 120 TLS handshake to bypass Cloudflare 403
-          session = requests.Session(impersonate="chrome120")
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              context = browser.new_context(
+                  user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+              )
+              page = context.new_page()
 
-          # 1. Check Live Panel (panel.baohost.com)
-          try:
-              resp = session.get("https://panel.baohost.com/auth/register", allow_redirects=True, timeout=20)
-              final_url = str(resp.url).lower()
-              panel_html = resp.text.lower()
+              # 1. Check Live Panel with full JavaScript rendering
+              try:
+                  page.goto("https://panel.baohost.com/auth/register", wait_until="networkidle", timeout=30000)
+                  page.wait_for_timeout(3000) # Give React 3 seconds to render form or redirect
+                  final_url = page.url.lower()
+                  visible_text = page.inner_text("body").lower()
+                  input_count = page.locator("input").count()
 
-              if resp.status_code == 403:
-                  reasons.append("Panel behind Cloudflare JS challenge (403)")
-              elif resp.status_code in [404, 530, 502, 503]:
-                  reasons.append(f"Panel returned HTTP {resp.status_code}")
-              elif "/login" in final_url and "register" not in panel_html:
-                  reasons.append("Panel redirected to /auth/login (Closed)")
-              elif any(w in panel_html for w in ["closed", "disabled", "unable to create", "not accepting"]):
-                  reasons.append("Panel states sign-ups are closed")
-              elif resp.status_code == 200 and ("/register" in final_url or "confirm password" in panel_html):
-                  is_open = True
-                  reasons.append("Live registration page active on panel.baohost.com!")
-              else:
-                  reasons.append(f"Panel HTTP {resp.status_code} at {final_url}")
-          except Exception as e:
-              reasons.append(f"Panel error ({str(e)[:35]})")
+                  if "/login" in final_url and "register" not in visible_text and "sign up" not in visible_text:
+                      reasons.append("Panel redirected to /auth/login")
+                  elif any(w in visible_text for w in ["closed", "disabled", "not accepting", "unable to create"]):
+                      reasons.append("Panel states sign-ups are closed")
+                  elif "/register" in final_url and input_count >= 2:
+                      is_open = True
+                      reasons.append(f"Live registration form active ({input_count} input fields found)!")
+                  else:
+                      reasons.append(f"Panel checked (URL: {final_url}, Inputs: {input_count})")
+              except Exception as e:
+                  reasons.append(f"Panel browser check error ({str(e)[:40]})")
 
-          # 2. Check Help Center Article (help.baohost.com)
-          try:
-              resp2 = session.get("https://help.baohost.com/articles/registration-for-new-users", timeout=20)
-              help_html = resp2.text.lower()
-              if resp2.status_code != 200:
-                  reasons.append(f"Help article returned HTTP {resp2.status_code}")
-              elif "new registrations are currently closed" not in help_html and "closed" not in help_html:
-                  is_open = True
-                  reasons.append("Help Center article updated!")
-              else:
-                  reasons.append("Help article still says closed")
-          except Exception as e:
-              reasons.append(f"Help article unreachable ({str(e)[:30]})")
+              # 2. Check Help Center Article
+              try:
+                  page.goto("https://help.baohost.com/articles/registration-for-new-users", wait_until="domcontentloaded", timeout=20000)
+                  help_text = page.inner_text("body").lower()
+                  if "new registrations are currently closed" not in help_text and "closed" not in help_text:
+                      is_open = True
+                      reasons.append("Help Center article no longer says closed!")
+                  else:
+                      reasons.append("Help article still says closed")
+              except Exception as e:
+                  reasons.append("Help article unreachable")
+
+              browser.close()
 
           summary = " | ".join(reasons)
           if is_open:
-              send_discord_message(f"<@&{role_id}> 🟢 **BaoHost Sign-Ups appear to be OPEN!** ({summary})\nRegister now: https://panel.baohost.com/auth/register")
+              send_discord_message(f"<@&{role_id}> 🟢 **BaoHost Sign-Ups are OPEN!** ({summary})\nRegister now: https://panel.baohost.com/auth/register")
           else:
               send_discord_message(f"🔴 **BaoHost Check:** Sign-ups are still closed. *({summary})*")
