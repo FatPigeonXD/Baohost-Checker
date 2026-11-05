@@ -19,7 +19,7 @@ jobs:
         shell: python
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
-          USER_ID: "844844465835212820" # <-- Replace with your Discord User ID
+          ROLE_ID: "1560630961199124560" # <-- Replace with your Discord Role ID
           TEST_PING: ${{ inputs.send_test_ping }}
         run: |
           import os
@@ -28,7 +28,7 @@ jobs:
           import urllib.request
 
           webhook_url = os.environ.get("WEBHOOK_URL", "").strip()
-          user_id = os.environ.get("USER_ID", "").strip()
+          role_id = os.environ.get("ROLE_ID", "").strip()
           test_ping = os.environ.get("TEST_PING", "false").lower() == "true"
 
           if not webhook_url:
@@ -42,16 +42,20 @@ jobs:
           }
 
           def send_discord_message(text):
+              payload = {
+                  "content": text,
+                  "allowed_mentions": {"parse": ["roles"]}
+              }
               post_req = urllib.request.Request(
                   webhook_url,
-                  data=json.dumps({"content": text}).encode("utf-8"),
+                  data=json.dumps(payload).encode("utf-8"),
                   headers={"Content-Type": "application/json", "User-Agent": headers["User-Agent"]}
               )
               urllib.request.urlopen(post_req, timeout=15)
 
-          # 1. If you checked the "Send a test ping" box when running manually:
+          # 1. Manual test ping:
           if test_ping:
-              send_discord_message("<@" + user_id + "> 🛠️ **Test Ping Successful!** Your BaoHost GitHub monitor is connected.")
+              send_discord_message("<@&" + role_id + "> 🛠️ **Test Role Ping Successful!** Your BaoHost GitHub monitor is connected.")
               print("SUCCESS: Sent manual test ping to Discord!")
               sys.exit(0)
 
@@ -62,7 +66,7 @@ jobs:
           try:
               html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8").lower()
               if "closed" not in html and "disabled" not in html:
-                  send_discord_message("<@" + user_id + "> 🟢 **BaoHost Sign-Ups appear to be OPEN!** - https://panel.baohost.com/auth/register")
+                  send_discord_message("<@&" + role_id + "> 🟢 **BaoHost Sign-Ups appear to be OPEN!** - https://panel.baohost.com/auth/register")
                   print("SUCCESS: Alert sent to Discord!")
               else:
                   print("SUCCESS: Checked BaoHost — sign-ups are still closed.")
