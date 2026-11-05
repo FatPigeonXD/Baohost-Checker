@@ -4,11 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       send_test_ping:
-        description: "Send a test ping to Discord?"
+        description: "Send a test role ping to Discord?"
         required: false
         default: false
         type: boolean
-
 
 jobs:
   check:
@@ -23,7 +22,7 @@ jobs:
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
           ROLE_ID: "1560630961199124560"
-          TEST_PING: ${{ github.event_name == 'workflow_dispatch' && inputs.send_test_ping || false }}
+          TEST_PING: ${{ inputs.send_test_ping }}
 
         run: |
           import os
@@ -38,13 +37,15 @@ jobs:
           REGISTER_URL = "https://panel.baohost.com/auth/register"
 
           if not WEBHOOK_URL:
-              sys.exit("ERROR: DISCORD_WEBHOOK secret is empty!")
+              sys.exit("ERROR: DISCORD_WEBHOOK secret is missing!")
 
           if not ROLE_ID:
-              sys.exit("ERROR: ROLE_ID is empty!")
+              sys.exit("ERROR: ROLE_ID is missing!")
 
           def send_discord(message):
-              response = requests.post(
+              print("Sending Discord notification...")
+
+              result = requests.post(
                   WEBHOOK_URL,
                   json={
                       "content": message,
@@ -54,31 +55,27 @@ jobs:
                   },
                   timeout=20
               )
-              response.raise_for_status()
-              print("Discord notification sent successfully.")
 
-          # Optional Discord test ping
+              print("Discord HTTP response:", result.status_code)
+              result.raise_for_status()
+              print("Discord message sent successfully!")
+
+          # Optional test ping
           if TEST_PING:
               send_discord(
-                  f"<@&{ROLE_ID}> 🛠️ *Test Ping Successful!* "
-                  "BaoHost Signup Monitor is connected."
+                  f"<@&{ROLE_ID}> 🛠️ *TEST PING SUCCESSFUL!*\n"
+                  "Your BaoHost Signup Monitor is connected to Discord."
               )
-
-          session = requests.Session(
-              impersonate="chrome120"
-          )
-
-          session.headers.update({
-              "Accept": "text/html,application/xhtml+xml,"
-                        "application/xml;q=0.9,/;q=0.8",
-              "Accept-Language": "en-US,en;q=0.9"
-          })
 
           status = "UNKNOWN"
           reasons = []
 
           try:
-              print("Checking BaoHost registration page...")
+              print("Connecting to BaoHost...")
+
+              session = requests.Session(
+                  impersonate="chrome120"
+              )
 
               response = session.get(
                   REGISTER_URL,
@@ -87,15 +84,13 @@ jobs:
               )
 
               html = response.text.lower()
+              html = re.sub(r"\s+", " ", html)
               final_url = str(response.url).lower()
 
-              # Normalize HTML whitespace
-              clean_html = re.sub(r"\s+", " ", html)
-
-              print("HTTP Status:", response.status_code)
+              print("Website HTTP:", response.status_code)
               print("Final URL:", final_url)
 
-              # 1. Detect Cloudflare challenges
+              # Cloudflare detection
               challenge_markers = [
                   "cf-chl-",
                   "challenge-platform",
@@ -105,18 +100,12 @@ jobs:
                   "enable javascript and cookies"
               ]
 
-              is_challenge = any(
-                  marker in clean_html
-                  for marker in challenge_markers
-              )
-
-              if response.status_code == 403 or is_challenge:
+              if response.status_code == 403 or any(
+                  marker in html for marker in challenge_markers
+              ):
                   status = "UNKNOWN"
-                  reasons.append(
-                      "Cloudflare JavaScript challenge detected."
-                  )
+                  reasons.append("Cloudflare challenge detected.")
 
-              # 2. Detect BaoHost's actual paused page
               elif response.status_code != 200:
                   status = "UNKNOWN"
                   reasons.append(
@@ -124,6 +113,7 @@ jobs:
                   )
 
               else:
+                  # Actual paused messages from your screenshot
                   paused_markers = [
                       "sign up paused",
                       "sign up is temporarily disabled",
@@ -133,47 +123,38 @@ jobs:
                       "no eta for when sign up will reopen"
                   ]
 
-                  is_paused = any(
-                      marker in clean_html
-                      for marker in paused_markers
-                  )
-
-                  if is_paused:
+                  if any(marker in html for marker in paused_markers):
                       status = "CLOSED"
                       reasons.append(
-                          "BaoHost SIGN UP PAUSED screen detected."
+                          "BaoHost registration is temporarily paused."
                       )
 
-                  # 3. Detect an actual registration form
+                  # Check for a real registration form
                   elif (
                       "/auth/register" in final_url
-                      and "<form" in clean_html
+                      and "<form" in html
                       and re.search(
-                          r'type=["\']password["\']|'
-                          r'name=["\']password["\']',
-                          clean_html
+                          r'type=["\']password["\']|name=["\']password["\']',
+                          html
                       )
-                      and not is_challenge
                   ):
                       status = "OPEN"
                       reasons.append(
-                          "Live registration form detected!"
+                          "Registration form detected!"
                       )
 
                   else:
                       status = "UNKNOWN"
                       reasons.append(
-                          "Registration form or paused status "
-                          "could not be confirmed."
+                          "Could not confirm registration availability."
                       )
 
           except Exception as error:
               status = "UNKNOWN"
               reasons.append(
-                  f"Website check failed: {str(error)[:150]}"
+                  f"Website checking error: {str(error)[:200]}"
               )
 
-          # 4. Report results
           summary = " | ".join(reasons)
 
           print("--------------------------------")
@@ -181,21 +162,35 @@ jobs:
           print(summary)
           print("--------------------------------")
 
+          # ALWAYS send a Discord notification
+
           if status == "OPEN":
 
-              send_discord(
+              message = (
                   f"<@&{ROLE_ID}> 🟢 *BAOHOST SIGN-UPS ARE OPEN!*\n\n"
-                  f"Registration page: {REGISTER_URL}\n"
+                  f"Registration: {REGISTER_URL}\n"
                   f"Details: {summary}\n\n"
-                  "🚀 *Register now before slots fill up!*"
+                  "🚀 *REGISTER NOW!*"
               )
 
           elif status == "CLOSED":
 
-              print("🔴 Sign-ups are still paused.")
-              print("No Discord alert sent.")
+              message = (
+                  f"🔴 *BAOHOST SIGN-UPS ARE STILL CLOSED*\n\n"
+                  f"Details: {summary}\n"
+                  "I'll notify you when the registration page opens "
+                  "on your next manual check."
+              )
 
           else:
 
-              print("🟡 Status unknown.")
-              print("No false OPEN alert sent.")
+              message = (
+                  f"🟡 *BAOHOST STATUS: UNKNOWN*\n\n"
+                  f"Details: {summary}\n"
+                  "The website could not be verified. "
+                  "No OPEN status has been assumed."
+              )
+
+          send_discord(message)
+
+          print("Monitor finished successfully.")
