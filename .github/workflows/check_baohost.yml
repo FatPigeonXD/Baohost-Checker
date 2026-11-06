@@ -11,10 +11,10 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+   runs-on: self-hosted
     steps:
       - name: Install Dependencies
-        run: pip install curl_cffi
+        run: py -m pip install curl_cffi
 
       - name: Monitor Panel Status
         shell: python
