@@ -11,7 +11,7 @@ on:
 
 jobs:
   check:
-   runs-on: self-hosted
+    runs-on: self-hosted
     steps:
       - name: Install Dependencies
         run: py -m pip install curl_cffi
@@ -44,7 +44,7 @@ jobs:
               requests.post(webhook_url, json=payload, timeout=15)
 
           if test_ping:
-              send_discord_message(f"<@&{role_id}> 🛠️ **Test Role Ping Successful!** Monitor is connected.")
+              send_discord_message(f"<@&{role_id}> 🛠️ **Test Role Ping Successful!** Self-hosted PC monitor is connected.")
 
           session = requests.Session(impersonate="chrome120")
           is_open = False
