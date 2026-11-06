@@ -1,87 +1,71 @@
-name: Check BaoHost Signups
+import asyncio
+import time
+import nodriver as uc
+from curl_cffi import requests
 
-on:
-  workflow_dispatch:
-    inputs:
-      send_test_ping:
-        description: 'Send a test ping to Discord right now?'
-        required: false
-        default: false
-        type: boolean
+WEBHOOK_URL = "secrets.DISCORD_WEBHOOK"
+ROLE_ID = "1560630961199124560"  # Your Discord Role ID
+CHECK_INTERVAL_MINUTES = 10
 
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install Dependencies
-        run: pip install curl_cffi
+def send_discord_message(text):
+    payload = {
+        "content": text,
+        "allowed_mentions": {"parse": ["roles"]}
+    }
+    try:
+        requests.post(WEBHOOK_URL, json=payload, timeout=15)
+    except Exception as e:
+        print(f"Discord error: {e}")
 
-      - name: Monitor Panel Status
-        shell: python
-        env:
-          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
-          ROLE_ID: "1560630961199124560" # <-- Replace with your Discord Role ID
-          TEST_PING: ${{ inputs.send_test_ping }}
-        run: |
-          import os
-          import sys
-          import json
-          from curl_cffi import requests
+async def check_panel():
+    # Uses a saved profile folder so Cloudflare clearance cookies persist!
+    browser = await uc.start(
+        headless=False,
+        user_data_dir="C:/baohost/chrome_profile"
+    )
+    try:
+        page = await browser.get("https://panel.baohost.com/auth/register")
+        
+        # Wait 8 seconds for Cloudflare JS challenge ("Just a moment...") to auto-solve
+        await page.sleep(8)
+        
+        title = (await page.evaluate("document.title")).lower()
+        body_text = (await page.evaluate("document.body.innerText")).lower()
+        current_url = (await page.evaluate("window.location.href")).lower()
 
-          webhook_url = os.environ.get("WEBHOOK_URL", "").strip()
-          role_id = os.environ.get("ROLE_ID", "").strip()
-          test_ping = os.environ.get("TEST_PING", "false").lower() == "true"
+        is_open = False
+        if "just a moment" in title or "attention required" in title:
+            # Click Turnstile checkbox automatically if prompted
+            try:
+                await page.verify_cf()
+                await page.sleep(5)
+                title = (await page.evaluate("document.title")).lower()
+                body_text = (await page.evaluate("document.body.innerText")).lower()
+            except Exception:
+                pass
 
-          if not webhook_url:
-              print("ERROR: DISCORD_WEBHOOK secret is empty!")
-              sys.exit(1)
+        if "just a moment" in title:
+            status_detail = "Cloudflare challenge still loading"
+        elif "500" in title or "server error" in body_text or "500" in body_text:
+            status_detail = "Reached panel! Registration disabled (500 Server Error)"
+        elif "/login" in current_url and "register" not in body_text:
+            status_detail = "Reached panel! Redirected to /auth/login (Closed)"
+        elif any(w in body_text for w in ["closed", "disabled", "not accepting"]):
+            status_detail = "Reached panel! Page states sign-ups are closed"
+        else:
+            is_open = True
+            status_detail = f"Registration page loaded! (Title: {title})"
 
-          def send_discord_message(text):
-              payload = {
-                  "content": text,
-                  "allowed_mentions": {"parse": ["roles"]}
-              }
-              requests.post(webhook_url, json=payload, timeout=15)
+        if is_open:
+            send_discord_message(f"<@&{ROLE_ID}> 🟢 **BaoHost Sign-Ups are OPEN!** ({status_detail})\nRegister now: https://panel.baohost.com/auth/register")
+        else:
+            send_discord_message(f"🔴 **BaoHost Check:** Closed. *({status_detail})*")
 
-          if test_ping:
-              send_discord_message(f"<@&{role_id}> 🛠️ **Test Role Ping Successful!** Monitor is connected.")
+    finally:
+        browser.stop()
 
-          # Use Chrome TLS fingerprinting
-          session = requests.Session(impersonate="chrome120")
-          
-          target_url = "https://panel.baohost.com/auth/register"
-          is_open = False
-          status_detail = ""
-
-          try:
-              # We check how the server responds to a standard browser-like request
-              resp = session.get(target_url, allow_redirects=True, timeout=20)
-              final_url = str(resp.url).lower()
-              status_code = resp.status_code
-              body_snippet = resp.text[:300].lower()
-
-              status_detail = f"Code: {status_code}, URL: {final_url}"
-
-              # Criteria for an unannounced silent opening:
-              # 1. It stops throwing strict blocking codes and gives a clean 200 OK
-              # 2. It doesn't instantly bounce you back out to a strict login/closed handler
-              if status_code == 200:
-                  if "auth/login" not in final_url and "closed" not in body_snippet:
-                      is_open = True
-                      status_detail = "Panel returned clean 200 OK without login redirect!"
-                  else:
-                      status_detail = "Panel active layout but still routing to login/closed."
-              elif status_code == 403:
-                  status_detail = "Cloudflare JS Challenge active (Standard Closed State)"
-              else:
-                  status_detail = f"Unexpected status: {status_code}"
-
-          except Exception as e:
-              status_detail = f"Connection error: {str(e)[:30]}"
-
-          if is_open:
-              send_discord_message(f"<@&{role_id}> 🟢 **BaoHost Sign-Ups MIGHT BE OPEN (Silent Shift Detected)!**\nStatus: {status_detail}\nCheck now: https://panel.baohost.com/auth/register")
-              print("SUCCESS: Potential open alert sent!")
-          else:
-              send_discord_message(f"🔴 **BaoHost Check:** Closed. *({status_detail})*")
-              print("SUCCESS: Checked, currently closed.", status_detail)
+if __name__ == "__main__":
+    print("Starting real Chrome monitor with saved Cloudflare profile...")
+    while True:
+        uc.loop().run_until_complete(check_panel())
+        time.sleep(CHECK_INTERVAL_MINUTES * 60)
