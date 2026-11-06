@@ -14,10 +14,11 @@ jobs:
     runs-on: self-hosted
     steps:
       - name: Install Dependencies
+        shell: cmd
         run: py -m pip install curl_cffi
 
       - name: Monitor Panel Status
-        shell: python
+        shell: py {0}
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
           ROLE_ID: "1560630961199124560"
